@@ -1,0 +1,166 @@
+# Builds Shout.app, packages it as a disk image and publishes it as a GitHub Release (docs/RELEASING.md).
+#
+#   - Push a tag:   git tag v1.2.0 && git push origin v1.2.0
+#   - Or Actions → Release → Run workflow, with a version (tags the chosen branch).
+#   - Pull requests that change the packaging build the disk image too, attached to the run, without a release.
+#
+# Signing comes from repository secrets, each step only when its secrets are there:
+#   MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD  a "Developer ID Application" (or "Apple Development") identity
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD        notarization (needs Developer ID)
+# Without them the app is ad-hoc signed.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 1.2.0 or 1.2.0-beta.1 (a prerelease). Tagged v<version> on the chosen branch."
+        required: true
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/**"
+      - "Resources/**"
+      - "Package.swift"
+      - "Vendor/**"
+      - "Sources/Shout/App/main.swift"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      CAN_NOTARIZE: ${{ secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the build number counts commits
+
+      - name: Version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            push) V="${GITHUB_REF_NAME#v}" ;;
+            workflow_dispatch) V="${INPUT_VERSION#v}" ;;
+            *) V="0.0.0-pr$PR_NUMBER" ;;
+          esac
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$V' isn't a version like 1.2.0 or 1.2.0-beta.1"; exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "::error::Tag v$V already exists. Pick a new version."; exit 1
+          fi
+          {
+            echo "version=$V"
+            echo "short=${V%%-*}" # the app's version takes numbers only
+            echo "build=$(git rev-list --count HEAD)"
+            if [[ "$V" == *-* ]]; then echo "prerelease=true"; else echo "prerelease=false"; fi
+          } >> "$GITHUB_OUTPUT"
+          echo "Shout $V, build $(git rev-list --count HEAD)"
+
+      - name: Import signing certificate
+        if: env.HAS_CERTIFICATE == 'true'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # Apple's intermediate certificates, so the identity is valid even if the runner lacks them.
+          for ca in AppleWWDRCAG3 DeveloperIDG2CA; do
+            curl -fsSL "https://www.apple.com/certificateauthority/$ca.cer" -o "$RUNNER_TEMP/$ca.cer"
+            security import "$RUNNER_TEMP/$ca.cer" -k "$KEYCHAIN" >/dev/null 2>&1 || true
+          done
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Searched first, ahead of the runner's own keychains (xargs reads their quoted paths).
+          security list-keychains -d user | xargs security list-keychains -d user -s "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build Shout.app
+        env:
+          SHOUT_VERSION: ${{ steps.version.outputs.short }}
+          SHOUT_BUILD: ${{ steps.version.outputs.build }}
+        run: scripts/build-app.sh
+
+      - name: Package (and notarize when set up)
+        env:
+          SHOUT_DMG_VERSION: ${{ steps.version.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [[ "$CAN_NOTARIZE" == true && "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            scripts/make-dmg.sh --notarize
+          else
+            scripts/make-dmg.sh
+          fi
+
+      - name: Attach the disk image to this run (pull requests)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Shout-${{ steps.version.outputs.version }}
+          path: dist/Shout-*.dmg*
+          retention-days: 7
+
+      - name: Publish the release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          DMG="Shout-$V.dmg"
+          AUTHORITY="$(codesign -dvv dist/Shout.app 2>&1 | awk -F= '/^Authority=/ && !f {print $2; f=1}')"
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "## Install"
+            echo
+            echo "Needs an Apple Silicon Mac with macOS 14 or later."
+            echo
+            echo "1. Download **$DMG** below, open it, and drag Shout to Applications."
+            if xcrun stapler validate -q "dist/$DMG" 2>/dev/null; then
+              echo "2. Open Shout from Applications."
+            else
+              echo "2. Open Shout from Applications. This build isn't notarized, so macOS says it can't check it:"
+              echo "   click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**"
+              echo "   next to \"Shout was blocked\". Or run \`xattr -dr com.apple.quarantine /Applications/Shout.app\`."
+            fi
+            if [[ -z "$AUTHORITY" ]]; then
+              echo
+              echo "This build is ad-hoc signed, so macOS treats each update as a new app: allow Accessibility,"
+              echo "Microphone and Screen Recording again (remove Shout's old entry in Privacy & Security first)."
+            fi
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "dist/$DMG.sha256")\`"
+            echo
+          } > "$NOTES"
+          ARGS=(--title "Shout $V" --notes-file "$NOTES" --generate-notes)
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then ARGS+=(--target "$GITHUB_SHA"); fi
+          if [[ "$PRERELEASE" == true ]]; then ARGS+=(--prerelease); fi
+          gh release create "v$V" "dist/$DMG" "dist/$DMG.sha256" "${ARGS[@]}"
+
+      - name: Remove the signing keychain
+        if: always() && env.HAS_CERTIFICATE == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

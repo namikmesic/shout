@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Shout</string>
+    <key>CFBundleDisplayName</key><string>Shout</string>
+    <key>CFBundleExecutable</key><string>Shout</string>
+    <key>CFBundleIdentifier</key><string>com.namikmesic.shout</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSMicrophoneUsageDescription</key><string>Shout listens only while you hold your dictation shortcut and transcribes your voice on this Mac.</string>
+    <key>NSAudioCaptureUsageDescription</key><string>Scribe records the other people on your calls so it can transcribe your meetings on this Mac.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>Scribe reads your calendars on this Mac to remind you before meetings and to name notes and attendees. Nothing leaves your Mac.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Shout can use Apple's on-device speech recognizer to transcribe your voice.</string>
+    <key>NSHumanReadableCopyright</key><string>Local-only dictation. All processing on device.</string>
+</dict>
+</plist>

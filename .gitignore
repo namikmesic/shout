@@ -1,0 +1,10 @@
+.build/
+dist/
+.swiftpm/
+Resources/AppIcon.icns
+*.part
+.DS_Store
+
+# Private notes, kept on this Mac only (Wispr Flow analysis and the pre-1.0 review record)
+docs/notetaker-re/
+docs/REVERSE_ENGINEERING.md
